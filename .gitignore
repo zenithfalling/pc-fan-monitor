@@ -1,0 +1,19 @@
+﻿# Python
+# Virtual environment
+.env/
+__pycache__/
+venv/
+env/
+
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
