@@ -48,7 +48,8 @@
     <Folder Include="ui\" />
   </ItemGroup>
   <ItemGroup>
-    <Content Include="config\config.json" />
+    <Content Include="config\app_config.json" />
+    <Content Include="config\experiment_config.json" />
     <Content Include="docs\signal_map.md" />
     <Content Include="README.md" />
     <Content Include="requirements.txt" />

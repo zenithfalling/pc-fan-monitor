@@ -1,9 +1,11 @@
 ﻿from PySide6.QtWidgets import (QButtonGroup, QComboBox, QRadioButton,QTextEdit,QWidget,QPushButton,QLabel,
-                               QHBoxLayout,QVBoxLayout,QGridLayout,QFrame,QStackedWidget,QGroupBox)
+                               QHBoxLayout,QVBoxLayout,QGridLayout,QFrame,QStackedWidget,QGroupBox,QMessageBox)
 from PySide6.QtCore import QMutex, QObject, QTimer, Slot,QThread,Signal
 from PySide6.QtSerialPort import QSerialPort,QSerialPortInfo
 import pyqtgraph as pg
 from enum import IntEnum
+
+from pyqtgraph.graphicsItems.ScatterPlotItem import tr
 
 class Mode(IntEnum):
     DEBUG = 1
@@ -50,9 +52,8 @@ class DebugPage(QWidget):
         self.curve01 = self.widget_speedRealtime.plot(pen=pg.mkPen("r",width=1.5),name="实际转速")
         self.curve02 = self.widget_speedRealtime.plot(pen=pg.mkPen("b",width=1.5),name="设定转速")
         layout_debugpage.addWidget(self.widget_speedRealtime)
-        # 目前缺少信号与槽部分的内容，一个是数据保存还没有写，还有就是自己也还没有想清楚
         # 最后的点都标记数据，这个还得考虑
-        self.text1 = pg.TextItem(color='r', anchor=(0, 1))  # anchor=(0,1) 表示文本左下角对齐数据点
+        self.text1 = pg.TextItem(color='r', anchor=(1, 0))  # anchor=(0,1) 表示文本左下角对齐数据点
         self.text2 = pg.TextItem(color='b', anchor=(0, 0))  # anchor=(0,0) 表示文本左上角对齐数据点
         self.widget_speedRealtime.addItem(self.text1)
         self.widget_speedRealtime.addItem(self.text2)
@@ -128,13 +129,16 @@ class MainWindow(QWidget):
     sig_modeChange = Signal(int)
     sig_clearStaticsData = Signal()
     sig_clearPicBuffer = Signal()
+    sig_savedata = Signal()
+    sig_stopsave = Signal()
 
-    def __init__(self,config_mode,dataProcess,serialProcess,staProcess):
+    def __init__(self,config_mode,dataProcess,serialProcess,staProcess,dataSaveProcess):
         super().__init__()
         self.configMode = config_mode
         self.dataProcess = dataProcess
         self.serialWorker = serialProcess
         self.staProcess = staProcess
+        self.dataSaveProcess = dataSaveProcess
         self.sig_modeChange.connect(self.dataProcess.set_mode)
         self.sig_clearStaticsData.connect(self.staProcess.clear)
         self.sig_clearPicBuffer.connect(self.dataProcess.clear_pic_data)
@@ -147,10 +151,17 @@ class MainWindow(QWidget):
         self.serialWorker.sig_receivedData.connect(self.dataProcess.save_data)
         self.serialWorker.sig_crc.connect(self.staProcess.on_crc_error)
         self.serialWorker.sig_packetLoss.connect(self.staProcess.on_packetloss)
+        self.save_thread = QThread()
+        self.dataSaveProcess.moveToThread(self.save_thread)
+        self.dataSaveProcess.sig_save_success.connect(self.saveDataSuccessful)# 只是显示保存成功
+        self.serialWorker.sig_savedata.connect(self.dataSaveProcess.write_data)
+        self.sig_savedata.connect(self.dataSaveProcess.start_logging)
+        self.sig_stopsave.connect(self.dataSaveProcess.stop_logging)
         self.statisTimer = QTimer(self) # 控制统计数据的显示刷新
         self.statisTimer.setInterval(2000)
         self.initUI()
         self.serial_thread.start()
+        self.save_thread.start()
 
     def initUI(self):
         self.setWindowTitle("风扇转速监控")
@@ -214,6 +225,18 @@ class MainWindow(QWidget):
         self.modeGroup.addButton(self.debug_radio,Mode.DEBUG)
         self.modeGroup.addButton(self.normal_radio,Mode.NORMAL)
         self.modeGroup.idClicked.connect(self.on_mode_changed)
+        #调试数据保存到文件，仅调试模式有效
+        group_box2 = QGroupBox("保存数据，仅调试模式")
+        box2_layout = QHBoxLayout(group_box2)
+        self.saveData_btn = QPushButton("开始保存")
+        self.saveData_btn.clicked.connect(self.saveData_btn_clicked)
+        self.stopSave_btn = QPushButton("停止保存")
+        self.stopSave_btn.clicked.connect(self.stopSave_btn_clicked)
+        # 缺少槽函数的连接
+        self.saveData_btn.setEnabled(False) #默认禁用，确认是调试页面再启用
+        self.stopSave_btn.setEnabled(False)
+        box2_layout.addWidget(self.saveData_btn)
+        box2_layout.addWidget(self.stopSave_btn)
         #统计信息部分
         window_status = QFrame()
         layout_status = QGridLayout(window_status)
@@ -225,10 +248,6 @@ class MainWindow(QWidget):
         self.lossPackage = QTextEdit()
         self.lossPackage.setText("0")
         layout_status.addWidget(self.lossPackage,1,1)
-        layout_status.addWidget(QLabel("转速差"),2,0)
-        self.speedDiff = QTextEdit()
-        self.speedDiff.setText("0")
-        layout_status.addWidget(self.speedDiff,2,1)
         self.clearData_btn = QPushButton()
         self.clearData_btn.setText("统计清零")
         self.clearData_btn.clicked.connect(self.clearData_btn_clicked)
@@ -241,6 +260,7 @@ class MainWindow(QWidget):
         #左侧布局添加
         left_layout.addWidget(window_serial)
         left_layout.addWidget(group_box)
+        left_layout.addWidget(group_box2)
         left_layout.addWidget(window_status)
         #图像界面不同显示页面
         self.stack = QStackedWidget()
@@ -271,7 +291,6 @@ class MainWindow(QWidget):
             }
         self.sig_openserial.emit(serialConfig)
         #所有串口配置的参数合集到一个变量，只传递这一个
-        #这里应该还有启动画图取数据的定时器？
 
     def closeSerial_btn_clicked(self):
         #关闭串口对应槽函数
@@ -308,13 +327,26 @@ class MainWindow(QWidget):
         self.debug_page.timer.stop()
         self.normal_page.timer.stop()
         if current_page is self.debug_page:
+            self.saveData_btn.setEnabled(True)
+            self.stopSave_btn.setEnabled(True)
             self.debug_page.timer.start()
-            self.speedDiff.setVisible(self.configMode["debug"]["show_speed_error"])
             self.statisTimer.setInterval(self.configMode["debug"]["plot_period"])
         elif current_page is self.normal_page:
+            self.saveData_btn.setEnabled(False)
+            self.stopSave_btn.setEnabled(False)
             self.normal_page.timer.start()
-            self.speedDiff.setVisible(self.configMode["normal"]["show_speed_error"])
             self.statisTimer.setInterval(self.configMode["normal"]["plot_period"])
+
+    def saveData_btn_clicked(self):
+        self.saveData_btn.setEnabled(False)
+        self.stopSave_btn.setEnabled(True)
+        self.sig_savedata.emit()
+
+    def stopSave_btn_clicked(self):
+        self.saveData_btn.setEnabled(True)
+        self.stopSave_btn.setEnabled(False)
+        self.sig_stopsave.emit()
+
 
     def set_statistics_data(self):
         # 定时更新统计信息显示部分
@@ -338,3 +370,6 @@ class MainWindow(QWidget):
         else:
             return
         self.sig_clearPicBuffer.emit()# 清除图像的同时清除数据缓存
+
+    def saveDataSuccessful(self):
+        QMessageBox.information(None,"提示信息","文件已写入")

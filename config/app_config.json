@@ -1,8 +1,8 @@
 ﻿{
   "debug": {
-    "show_speed_error": false,
+    "show_speed_error": true,
     "max_length": 150,
-    "plot_period": 20
+    "plot_period": 50
   },
   "normal": {
     "show_speed_error": true,

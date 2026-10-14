@@ -5,6 +5,9 @@ __pycache__/
 venv/
 env/
 
+# debug data
+PIDDebugData/
+
 
 # Visual Studio
 .vs/

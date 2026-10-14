@@ -2,6 +2,18 @@
 from PySide6.QtCore import QObject,Slot,Signal
 from PySide6.QtSerialPort import QSerialPort,QSerialPortInfo
 import struct
+from dataclasses import dataclass
+
+#专门用来传输协议数据的类型，把长短帧统一起来
+@dataclass
+class ProtocolData:
+    currentSpeed:int | None = None
+    targetSpeed:int | None = None
+    duty:int | None = None
+    P:float | None = None
+    I:float | None = None
+    D:float | None = None
+    timestamp:int | None = None
 
 # 定义一个类，区分串口是打开动作还是关闭动作，把主界面对应的串口状态改变整理到一个函数中
 class SerialAction(IntEnum):
@@ -10,16 +22,19 @@ class SerialAction(IntEnum):
 
 class SerialReceiver(QObject):
     sig_serial_status = Signal(bool,int,str) # 串口状态监视，影响主界面的按钮可用性
-    sig_receivedData = Signal(int,int)# 解析后的原始数据，发给datamanager
+    sig_receivedData = Signal(object)# 解析后的原始数据，发给datamanager
     sig_crc = Signal()
     sig_packetLoss = Signal(int)
+    sig_savedata = Signal(object)
 
     def __init__(self):
         super().__init__()
         self.ser = QSerialPort(self)
-        self.ser.readyRead.connect(self.readData) # 信号与槽连接
+        #self.ser.readyRead.connect(self.readData) # 信号与槽连接
+        self.ser.readyRead.connect(self.readDataDebug) #为debug模式单独写的，但是能否切换信号与槽的绑定，随着不同模式？
         self.FRAME_HEADER = b'\x55\xAA'
         self.FRAME_LEN = 12 # 字节数
+        self.FRAME_LEN_DEBUG = 30
         self.buffer = bytearray()
         self.errorCRCNum = 0
         self.speedGap = 0
@@ -78,13 +93,57 @@ class SerialReceiver(QObject):
                         self.packetIndex += 1
                         if(self.packetIndex & 0xFF != packageNumber):
                             self.packetLoss = packageNumber - self.packetIndex
+                            self.packetIndex = packageNumber #如果丢了不止1包，要补上最新的
                             self.sig_packetLoss.emit(self.packetLoss)
                 else:
                     #breakpoint()
                     self.errorCRCNum += 1
                     self.packetIndex += 1
                     self.sig_crc.emit()
-                self.sig_receivedData.emit(self.currentSpeed,self.targetSpeed)
+                data_temp02 = ProtocolData(currentSpeed=self.currentSpeed,targetSpeed=self.targetSpeed)
+                self.sig_receivedData.emit(data_temp02)
+            else:
+                del self.buffer[0]
+
+    @Slot()
+    def readDataDebug(self):
+        data_temp = self.ser.readAll().data()
+        self.buffer.extend(data_temp)
+        while(len(self.buffer) >= self.FRAME_LEN_DEBUG):
+            if(self.buffer[0:2] == self.FRAME_HEADER):
+                dbts = bytes(self.buffer[0:self.FRAME_LEN_DEBUG])
+                del self.buffer[0:self.FRAME_LEN_DEBUG]
+                if(self.calcrc32(dbts[0:26]) == dbts[26:30]):
+                    packageNumber = dbts[3]
+                    self.currentSpeed = int.from_bytes(dbts[4:6],byteorder='big',signed=False)
+                    self.targetSpeed = int.from_bytes(dbts[6:8],byteorder='big',signed=False)
+                    self.duty = int.from_bytes(dbts[8:10],byteorder='big',signed=False)
+                    #breakpoint()
+                    self.P, self.I, self.D = struct.unpack('>fff',dbts[10:22])
+                    #breakpoint()
+                    self.timestamp = int.from_bytes(dbts[22:26],byteorder='big',signed=False)
+                    if(self.packetIndex == None):
+                        self.packetIndex = packageNumber
+                    else:
+                        self.packetIndex += 1
+                        if(self.packetIndex & 0xFF != packageNumber):
+                            self.packetLoss = packageNumber - self.packetIndex
+                            self.packetIndex = packageNumber #如果丢了不止1包，要补上最新的
+                            self.sig_packetLoss.emit(self.packetLoss)
+                else:
+                    self.errorCRCNum += 1
+                    self.packetIndex += 1
+                    self.sig_crc.emit()
+                data_temp02 = ProtocolData(
+                    currentSpeed=self.currentSpeed,
+                    targetSpeed=self.targetSpeed,
+                    duty=self.duty,
+                    P=self.P,
+                    I=self.I,
+                    D=self.D,
+                    timestamp=self.timestamp)
+                self.sig_receivedData.emit(data_temp02)
+                self.sig_savedata.emit(data_temp02)
             else:
                 del self.buffer[0]
 
